@@ -93,7 +93,9 @@ bot.launch();
 *Financial safety*: Telegram API never sends card numbers, CVV, or bank details. Only safe fields such as ```total_amount```, ```currency```, and transaction IDs are included.
 
 *Raw update*:
+
 - Provides a safe snapshot for debugging or analytics.
+
 - Truncated for normal events, full safe details for payments.
 
 ## Contributing
