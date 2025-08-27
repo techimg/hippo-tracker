@@ -15,7 +15,7 @@ import fetch from "node-fetch";
  * @param {boolean} [options.includeRawUpdate=false] - Include raw update JSON
  * @returns {function} Telegraf middleware
  */
-export const hippoTrack = (endpoint, options = {}) => {
+export const hippoTrack = (bot, token, endpoint, options = {}) => {
   const {
     includeRawUpdate = false,
     log = false,
@@ -23,7 +23,7 @@ export const hippoTrack = (endpoint, options = {}) => {
     timeoutMs = 3000,
   } = options;
 
-  return async (ctx, next) => {
+  bot.use(async (ctx, next) => {
     // Always allow bot logic to proceed first
     await next();
 
@@ -47,7 +47,10 @@ export const hippoTrack = (endpoint, options = {}) => {
       try {
         const response = await fetch(endpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
           body: JSON.stringify(payload),
           signal: controller.signal,
         });
@@ -56,10 +59,8 @@ export const hippoTrack = (endpoint, options = {}) => {
 
         if (log) {
           console.log(
-            "[hippoTrack] Sent event:",
-            eventType,
-            "->",
-            response.status,
+            "[hippoTrack]:",
+            payload
           );
         }
       } catch (error) {
@@ -68,7 +69,7 @@ export const hippoTrack = (endpoint, options = {}) => {
     } catch (error) {
       console.error("[hippoTrack] Error building payload:", error);
     }
-  };
+  });
 };
 
 /**
@@ -160,12 +161,12 @@ function safeCtx(ctx, bot, { includeRawUpdate, maxTextLength }) {
 
     raw_update: includeRawUpdate
       ? (() => {
-          try {
-            return ctx.update ? JSON.stringify(ctx.update) : null;
-          } catch {
-            return null;
-          }
-        })()
+        try {
+          return ctx.update ? JSON.stringify(ctx.update) : null;
+        } catch {
+          return null;
+        }
+      })()
       : null,
   };
 

@@ -1,6 +1,6 @@
 {
   "name": "@hippobots/tracker",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "A lightweight script to collect telemetry data from your Telegram bot.",
   "main": "index.js",
   "scripts": {
