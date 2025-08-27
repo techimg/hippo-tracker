@@ -1,0 +1,12 @@
+{
+  "name": "@hippobots/tracker",
+  "version": "1.0.6",
+  "description": "A lightweight script to collect telemetry data from your Telegram bot.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["telegram", "bot", "telemetry", "tracking"],
+  "author": "",
+  "license": "MIT"
+}
