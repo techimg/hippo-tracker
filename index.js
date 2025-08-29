@@ -7,6 +7,8 @@ import fetch from "node-fetch";
  * Captures messages, media, callbacks, inline queries, payments, and more.
  * Focuses on what the user actually selected, clicked, or triggered.
  *
+ * @param {object} telegrafBot - Telegraf bot instance
+ * @param {string} token - Auth token for telemetry endpoint
  * @param {string} endpoint - URL to send telemetry data to
  * @param {object} options - Configuration options
  * @param {boolean} [options.log=false] - Enable logging of sent payloads
@@ -15,7 +17,7 @@ import fetch from "node-fetch";
  * @param {boolean} [options.includeRawUpdate=false] - Include raw update JSON
  * @returns {function} Telegraf middleware
  */
-export const hippoTrack = (bot, token, endpoint, options = {}) => {
+export const hippoTrack = (telegrafBot, token, endpoint, options = {}) => {
   const {
     includeRawUpdate = false,
     log = false,
@@ -23,13 +25,12 @@ export const hippoTrack = (bot, token, endpoint, options = {}) => {
     timeoutMs = 3000,
   } = options;
 
-  bot.use(async (ctx, next) => {
-    // Always allow bot logic to proceed first
+  telegrafBot.use(async (ctx, next) => {
     await next();
 
     try {
       const eventType = detectEventType(ctx);
-      const safeData = safeCtx(ctx, ctx.telegram, {
+      const safeData = safeCtx(ctx, telegrafBot, {
         includeRawUpdate,
         maxTextLength,
       });
@@ -45,7 +46,7 @@ export const hippoTrack = (bot, token, endpoint, options = {}) => {
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
-        const response = await fetch(endpoint, {
+        await fetch(endpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -58,13 +59,16 @@ export const hippoTrack = (bot, token, endpoint, options = {}) => {
         clearTimeout(timeout);
 
         if (log) {
-          console.log(
-            "[hippoTrack]:",
-            payload
-          );
+          const json = JSON.stringify(payload);
+          console.log(`[hippoTrack] Payload size: ${Buffer.byteLength(json, "utf8")} bytes`);
+          console.log("[hippoTrack]:", payload);
         }
       } catch (error) {
-        console.error("[hippoTrack] Error sending event:", error);
+        if (error.name === "AbortError") {
+          console.error("[hippoTrack] Request timed out");
+        } else {
+          console.error("[hippoTrack] Error sending event:", error);
+        }
       }
     } catch (error) {
       console.error("[hippoTrack] Error building payload:", error);
@@ -74,9 +78,6 @@ export const hippoTrack = (bot, token, endpoint, options = {}) => {
 
 /**
  * Detects the type of Telegram update.
- *
- * @param {object} ctx - Telegraf context object
- * @returns {string} Event type
  */
 function detectEventType(ctx) {
   const update = ctx.update;
@@ -103,9 +104,6 @@ function detectEventType(ctx) {
 
 /**
  * Extracts Telegram timestamp from context.
- *
- * @param {object} ctx - Telegraf context object
- * @returns {number|null} Unix timestamp from Telegram update
  */
 function extractTgDate(ctx) {
   return (
@@ -116,29 +114,45 @@ function extractTgDate(ctx) {
     ctx.callbackQuery?.message?.date ??
     ctx.businessMessage?.date ??
     ctx.editedBusinessMessage?.date ??
+    ctx.chatMember?.date ??
+    ctx.myChatMember?.date ??
     null
   );
 }
 
 /**
  * Extracts and sanitizes relevant information from Telegraf context.
- * Focuses on user actions (messages, button clicks, inline queries).
- *
- * @param {object} ctx - Telegraf context object
- * @param {object} bot - Telegraf bot instance
- * @param {object} options - Configuration options
- * @param {number} options.maxTextLength - Max length for text fields
- * @param {boolean} options.includeRawUpdate - Include raw update in payload
- * @returns {object} Sanitized payload ready for sending
  */
 function safeCtx(ctx, bot, { includeRawUpdate, maxTextLength }) {
   const safeText = (text, max) =>
-    typeof text === "string" ? text.slice(0, max) : null;
+    typeof text === "string"
+      ? text.slice(0, max)
+      : typeof text === "object" && text !== null
+        ? JSON.stringify(text).slice(0, max)
+        : null;
+
+  // bot info
+  let botId = bot?.botInfo?.id ?? null;
+  let botUsername = bot?.botInfo?.username ?? null;
+
+  if (!botId || !botUsername) {
+    const botFrom =
+      ctx.update?.message?.from ??
+      ctx.update?.callback_query?.message?.from ??
+      ctx.update?.business_message?.from ??
+      ctx.update?.edited_business_message?.from ??
+      null;
+
+    if (botFrom?.is_bot) {
+      botId = botId ?? botFrom.id;
+      botUsername = botUsername ?? botFrom.username;
+    }
+  }
 
   const payload = {
     bot: {
-      username: bot?.botInfo?.username ?? null,
-      id: bot?.botInfo?.id ?? null,
+      id: botId,
+      username: botUsername,
     },
     user: {
       id: ctx.from?.id ?? null,
@@ -154,15 +168,25 @@ function safeCtx(ctx, bot, { includeRawUpdate, maxTextLength }) {
       username: ctx.chat?.username ?? null,
     },
 
-    // Only user-triggered actions (focus of analytics)
     message: safeText(ctx.message?.text, maxTextLength),
     callback_query: safeText(ctx.callbackQuery?.data, maxTextLength),
     inline_query: safeText(ctx.inlineQuery?.query, maxTextLength),
 
+    media_type: ctx.message?.photo
+      ? "photo"
+      : ctx.message?.video
+        ? "video"
+        : ctx.message?.document
+          ? "document"
+          : ctx.message?.sticker
+            ? "sticker"
+            : null,
+
     raw_update: includeRawUpdate
       ? (() => {
         try {
-          return ctx.update ? JSON.stringify(ctx.update) : null;
+          const sanitized = sanitizeUpdate(ctx.update, maxTextLength);
+          return JSON.stringify(sanitized);
         } catch {
           return null;
         }
@@ -174,20 +198,78 @@ function safeCtx(ctx, bot, { includeRawUpdate, maxTextLength }) {
 }
 
 /**
- * Recursively removes nulls, empty arrays, and empty objects.
- *
- * @param {any} obj - Object to clean
- * @returns {any} Cleaned object or null
+ * Sanitize update: trim long text fields, strip media (keep IDs only).
+ */
+function sanitizeUpdate(update, maxTextLength = 500) {
+  function sanitize(obj) {
+    if (Array.isArray(obj)) return obj.map(sanitize);
+
+    if (obj && typeof obj === "object") {
+      const out = {};
+      for (const [key, val] of Object.entries(obj)) {
+        // 1. Limit strings
+        if (typeof val === "string") {
+          out[key] =
+            val.length > maxTextLength
+              ? val.slice(0, maxTextLength) + "...[truncated]"
+              : val;
+          continue;
+        }
+
+        // 2. Left only file_id
+        if (
+          [
+            "photo",
+            "video",
+            "document",
+            "voice",
+            "sticker",
+            "animation",
+            "audio",
+            "video_note",
+            "new_chat_photo",
+            "thumb",
+            "thumbnail",
+          ].includes(key)
+        ) {
+          if (Array.isArray(val)) {
+            out[key] = val.map((v) => ({
+              file_id: v.file_id,
+              file_unique_id: v.file_unique_id,
+            }));
+          } else if (val && typeof val === "object") {
+            out[key] = {
+              file_id: val.file_id,
+              file_unique_id: val.file_unique_id,
+            };
+          }
+          continue;
+        }
+
+        // Recursion
+        out[key] = sanitize(val);
+      }
+      return out;
+    }
+
+    return obj;
+  }
+
+  return sanitize(update);
+}
+
+/**
+ * Recursively removes nulls and empty objects.
  */
 function removeNulls(obj) {
-  if (Array.isArray(obj)) return obj.map(removeNulls).filter((v) => v != null);
+  if (Array.isArray(obj)) return obj.map(removeNulls);
   if (typeof obj === "object" && obj !== null) {
     const cleaned = Object.fromEntries(
       Object.entries(obj)
         .map(([k, v]) => [k, removeNulls(v)])
-        .filter(([_, v]) => v != null && (!(Array.isArray(v) && v.length === 0)))
+        .filter(([_, v]) => v != null)
     );
-    return Object.keys(cleaned).length > 0 ? cleaned : null;
+    return cleaned;
   }
   return obj;
 }
